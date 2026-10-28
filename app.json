@@ -1,15 +1,18 @@
 {
   "expo": {
-    "name": "chiti-mitra",
-    "slug": "chiti-mitra",
+    "name": "Chiti Mitra",
+    "slug": "jpg",
+    "scheme": "chitmitra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.chitmitra.app"
     },
     "android": {
+      "package": "com.chitmitra.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,6 +23,21 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar"
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "3ae0467e-5e2e-4881-ad7a-4ef3234282a3"
+      }
+    },
+    "owner": "kpg18s-team"
   }
 }
