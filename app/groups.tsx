@@ -2,7 +2,7 @@ import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { Animated, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View, useColorScheme } from 'react-native';
 import { useAppContext } from '../src/context/AppContext';
-import { calculateChitPlan } from '../src/lib/finance';
+import { calculateChitPlan, hasOnePayoutPerMemberSchedule } from '../src/lib/finance';
 import { canManageGroup, getMemberGroups } from '../src/lib/groupAccess';
 import { getText } from '../src/lib/i18n';
 import type { AdminFeeMode, ChitType, Group, ManagementMode, Visibility } from '../src/types';
@@ -29,7 +29,7 @@ export default function GroupsScreen() {
   const [adminFeeAmount, setAdminFeeAmount] = useState('10');
   const [foremanCommissionPercent, setForemanCommissionPercent] = useState('5');
   const [minimumBidDiscount, setMinimumBidDiscount] = useState('500');
-  const [bidIncrement, setBidIncrement] = useState<100 | 200 | 500>(200);
+  const [bidIncrement, setBidIncrement] = useState('200');
   const [fixedDiscountAmount, setFixedDiscountAmount] = useState('500');
   const [totalContributionPerMember, setTotalContributionPerMember] = useState('100000');
   const [instalmentCount, setInstalmentCount] = useState('10');
@@ -135,7 +135,7 @@ export default function GroupsScreen() {
       setFormError('Choose a chit duration between 2 and 100 months.');
       return;
     }
-    if (months !== totalMembers) {
+    if (!hasOnePayoutPerMemberSchedule(totalMembers, months)) {
       setFormError('For a standard chit, the number of months must match the number of members so each member gets one winning turn.');
       return;
     }
@@ -148,6 +148,7 @@ export default function GroupsScreen() {
     const adminFee = adminFeeMode === 'none' ? 0 : Number(adminFeeAmount);
     const dueDate = Number(dueDay);
     const minDiscount = Number(minimumBidDiscount);
+    const bidRaise = Number(bidIncrement);
     const commissionPercent = Number(foremanCommissionPercent);
     const fixedDiscount = Number(fixedDiscountAmount);
     const grossPot = plan.grossMonthlyPot;
@@ -157,6 +158,10 @@ export default function GroupsScreen() {
     }
     if (!Number.isSafeInteger(grossPot)) {
       setFormError('The total group pot is too large to calculate safely.');
+      return;
+    }
+    if (!Number.isSafeInteger(bidRaise) || bidRaise < 1 || bidRaise > 1000000) {
+      setFormError('Enter a bid raise between ₹1 and ₹10,00,000.');
       return;
     }
     if (adminFeeMode !== 'none' && (!Number.isSafeInteger(adminFee) || adminFee <= 0 || adminFee > 1000000)) {
@@ -204,7 +209,7 @@ export default function GroupsScreen() {
       adminFeeMode,
       adminFeeAmount: adminFee,
       minimumBidDiscount: minDiscount,
-      bidIncrement,
+      bidIncrement: bidRaise,
       fixedDiscountAmount: fixedDiscount,
       monthlyContribution: contribution,
       memberCount: totalMembers,
@@ -225,7 +230,7 @@ export default function GroupsScreen() {
     setAdminFeeAmount('10');
     setForemanCommissionPercent('5');
     setMinimumBidDiscount('500');
-    setBidIncrement(200);
+    setBidIncrement('200');
     setFixedDiscountAmount('500');
     setTotalContributionPerMember('100000');
     setInstalmentCount('10');
@@ -370,7 +375,7 @@ export default function GroupsScreen() {
           {managementMode === 'agent-managed' && (
             <>
               <Text style={[styles.helperText, { color: palette.muted }]}>
-                Agent commission is deducted from the winning discount before dividends are shared. Set the agreed rate (up to 7% in the central Act; state rules may differ).
+                Agent commission is deducted from the winning discount before the remainder is added to the group balance. Set the agreed rate (up to 7% in the central Act; state rules may differ).
               </Text>
               <TextInput
                 accessibilityLabel="Agent commission percent"
@@ -437,19 +442,19 @@ export default function GroupsScreen() {
                 style={[styles.input, { color: palette.text, borderColor: palette.border, backgroundColor: palette.softBg }]}
               />
               <Text style={[styles.label, { color: palette.muted }]}>Raise bid by</Text>
-              <View style={styles.segmentRow}>
-                {([100, 200, 500] as const).map((amount) => (
-                  <TouchableOpacity
-                    key={amount}
-                    accessibilityRole="radio"
-                    accessibilityState={{ checked: bidIncrement === amount }}
-                    onPress={() => setBidIncrement(amount)}
-                    style={[styles.segmentButton, { backgroundColor: bidIncrement === amount ? palette.primarySoft : palette.softBg, borderColor: palette.border }]}
-                  >
-                    <Text style={[styles.segmentText, { color: bidIncrement === amount ? palette.primary : palette.text }]}>₹{amount}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+              <TextInput
+                accessibilityLabel="Auction bid raise amount"
+                value={bidIncrement}
+                onChangeText={(value) => setBidIncrement(value.replace(/[^\d]/g, ''))}
+                keyboardType="number-pad"
+                maxLength={7}
+                placeholder="200"
+                placeholderTextColor={palette.muted}
+                style={[styles.input, { color: palette.text, borderColor: palette.border, backgroundColor: palette.softBg }]}
+              />
+              <Text style={[styles.helperText, { color: palette.muted }]}>
+                Each tap during the auction raises the discount by this amount. Starting value: ₹200.
+              </Text>
             </>
           )}
           {chitType === 'fixed-discount' && (
@@ -496,7 +501,7 @@ export default function GroupsScreen() {
             </View>
           </View>
           <Text style={[styles.helperText, { color: palette.muted }]}>
-            Enter each member’s base subscription before auction dividends. For the standard one-winner-per-member cycle, months must equal the number of members.
+            Enter each member’s base subscription. Each member can receive one payout, so months must equal the number of members.
           </Text>
 
           <Animated.View
@@ -535,7 +540,7 @@ export default function GroupsScreen() {
                   {memberCount} members × ₹{chitPlan.monthlyContribution.toLocaleString('en-IN')} × {instalmentCount} months
                 </Text>
                 <Text style={[styles.planNote, { color: palette.muted }]}>
-                  Actual member dues can be lower after that round’s auction dividend.
+                  Auction discount remainder builds the chit balance for the final member who has not yet received a payout.
                 </Text>
                 {Number(instalmentCount) !== Number(memberCount) && (
                   <Text style={[styles.planWarning, { color: palette.danger }]}>

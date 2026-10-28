@@ -1,4 +1,4 @@
-import type { AdminFeeMode, AuctionRemainderMode, Group } from '../types';
+import type { AdminFeeMode, AuctionRemainderMode, AuctionRecord, Group, Member } from '../types';
 
 export function calculateGrossMonthlyChit(memberCount: number, monthlyContribution: number): number {
   return memberCount * monthlyContribution;
@@ -7,6 +7,13 @@ export function calculateGrossMonthlyChit(memberCount: number, monthlyContributi
 export function calculateExpectedTotal(groupMembers: number, monthlyContribution: number, instalments: number): number {
   const grossMonthly = calculateGrossMonthlyChit(groupMembers, monthlyContribution);
   return grossMonthly * instalments;
+}
+
+export function hasOnePayoutPerMemberSchedule(memberCount: number, instalmentCount: number): boolean {
+  return Number.isSafeInteger(memberCount)
+    && memberCount >= 2
+    && Number.isSafeInteger(instalmentCount)
+    && instalmentCount === memberCount;
 }
 
 export interface ChitPlan {
@@ -110,6 +117,28 @@ export function calculateChitSettlement({
   };
 }
 
+export function getFinalPayoutMember(group: {
+  members: Pick<Member, 'id' | 'name'>[];
+  auctions: Pick<AuctionRecord, 'winnerMemberId'>[];
+  currentRound: number;
+  instalmentCount: number;
+  memberCount: number;
+  reserveBalance: number;
+  totalAmount: number;
+}): Pick<Member, 'id' | 'name'> | null {
+  if (
+    group.currentRound > group.instalmentCount
+    || group.members.length !== group.memberCount
+    || group.memberCount !== group.instalmentCount
+    || group.reserveBalance < group.totalAmount
+    || group.totalAmount <= 0
+  ) return null;
+
+  const previousWinners = new Set(group.auctions.map((auction) => auction.winnerMemberId));
+  const eligibleMembers = group.members.filter((member) => !previousWinners.has(member.id));
+  return eligibleMembers.length === 1 ? eligibleMembers[0] : null;
+}
+
 export function getAdminFeePerMemberForRound(
   mode: AdminFeeMode,
   amount: number,
@@ -123,7 +152,7 @@ export function getAdminFeePerMemberForRound(
 
 export function getExpectedGroupCollections(
   group: Pick<Group, 'memberCount' | 'monthlyContribution' | 'instalmentCount' | 'adminFeeMode' | 'adminFeeAmount'>
-    & { auctions: Pick<Group['auctions'][number], 'round' | 'dividendPerMember'>[] },
+    & { auctions: Pick<Group['auctions'][number], 'round' | 'dividendPerMember' | 'waivedContributionMemberIds'>[] },
 ): number {
   const auctionsByRound = new Map(group.auctions.map((auction) => [auction.round, auction]));
   let expected = 0;
@@ -133,7 +162,9 @@ export function getExpectedGroupCollections(
       ? Math.max(group.monthlyContribution - auction.dividendPerMember, 0)
       : group.monthlyContribution;
     const feePerMember = getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, round);
-    expected += group.memberCount * (basePerMember + feePerMember);
+    const waivedMemberIds = new Set(auction?.waivedContributionMemberIds ?? []);
+    const contributingMembers = Math.max(group.memberCount - waivedMemberIds.size, 0);
+    expected += contributingMembers * basePerMember + group.memberCount * feePerMember;
   }
   return expected;
 }
@@ -155,16 +186,27 @@ export function getCollectionSummary(
     outstanding: number;
     adminFeeMode?: AdminFeeMode;
     adminFeeAmount?: number;
+    auctions?: Pick<AuctionRecord, 'round' | 'dividendPerMember' | 'waivedContributionMemberIds'>[];
   }[],
 ) {
   const expected = groups.reduce(
     (sum, group) => {
-      const totalAdminFee = group.adminFeeMode === 'monthly-per-member'
-        ? (group.adminFeeAmount ?? 0) * group.memberCount * group.instalmentCount
-        : group.adminFeeMode === 'one-time-per-member'
-          ? (group.adminFeeAmount ?? 0) * group.memberCount
-          : 0;
-      return sum + calculateExpectedTotal(group.memberCount, group.monthlyContribution, group.instalmentCount) + totalAdminFee;
+      const expectedForGroup = group.auctions
+        ? getExpectedGroupCollections({
+          memberCount: group.memberCount,
+          monthlyContribution: group.monthlyContribution,
+          instalmentCount: group.instalmentCount,
+          adminFeeMode: group.adminFeeMode ?? 'none',
+          adminFeeAmount: group.adminFeeAmount ?? 0,
+          auctions: group.auctions,
+        })
+        : calculateExpectedTotal(group.memberCount, group.monthlyContribution, group.instalmentCount)
+          + (group.adminFeeMode === 'monthly-per-member'
+            ? (group.adminFeeAmount ?? 0) * group.memberCount * group.instalmentCount
+            : group.adminFeeMode === 'one-time-per-member'
+              ? (group.adminFeeAmount ?? 0) * group.memberCount
+              : 0);
+      return sum + expectedForGroup;
     },
     0,
   );

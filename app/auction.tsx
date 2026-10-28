@@ -15,7 +15,7 @@ import * as Sharing from 'expo-sharing';
 import ViewShot from 'react-native-view-shot';
 import type { ViewShotRef } from 'react-native-view-shot';
 import { useAppContext } from '../src/context/AppContext';
-import { calculateChitSettlement, getAdminFeePerMemberForRound } from '../src/lib/finance';
+import { calculateChitSettlement, formatCurrency, getAdminFeePerMemberForRound, getFinalPayoutMember } from '../src/lib/finance';
 import { formatReportDate, getAuctionHistory, getAuctionPaymentSummary, getPreviousAuctionWinners } from '../src/lib/auctionReport';
 import { canManageGroup, getMemberGroups } from '../src/lib/groupAccess';
 import type { AuctionRecord, AuctionRemainderMode, Group, Member, PaymentRecord } from '../src/types';
@@ -25,7 +25,7 @@ type ReportSelection = { type: 'history' } | { type: 'round'; round: number };
 export default function AuctionScreen() {
   const { groupId: requestedGroupId } = useLocalSearchParams<{ groupId?: string | string[] }>();
   const groupId = Array.isArray(requestedGroupId) ? requestedGroupId[0] : requestedGroupId;
-  const { state, recordAuction, recordRoundContributions, setAuctionMemberPaid } = useAppContext();
+  const { state, recordAuction, recordFinalPayout, recordRoundContributions, setAuctionMemberPaid } = useAppContext();
   const scheme = useColorScheme();
   const isDark = state.theme === 'dark' || (state.theme === 'system' && scheme === 'dark');
   const palette = isDark ? darkColors : lightColors;
@@ -43,9 +43,8 @@ export default function AuctionScreen() {
   const [winnersByRound, setWinnersByRound] = useState<Record<string, string>>({});
   const [discountsByRound, setDiscountsByRound] = useState<Record<string, string>>({});
   const [auctionDate, setAuctionDate] = useState(getTodayDate());
-  const [memberAmountsByRound, setMemberAmountsByRound] = useState<Record<string, Record<string, string>>>({});
-  const [adminFeesByRound, setAdminFeesByRound] = useState<Record<string, Record<string, string>>>({});
-  const [remainderModesByRound, setRemainderModesByRound] = useState<Record<string, AuctionRemainderMode>>({});
+  const [paidMembersByRound, setPaidMembersByRound] = useState<Record<string, Record<string, boolean>>>({});
+  const [payersByRound, setPayersByRound] = useState<Record<string, Record<string, string>>>({});
   const [formError, setFormError] = useState('');
   const [collectionMessage, setCollectionMessage] = useState('');
   const [reportError, setReportError] = useState('');
@@ -109,9 +108,12 @@ export default function AuctionScreen() {
       : group.minimumBidDiscount;
   const winningDiscount = discountsByRound[roundKey] ?? String(defaultDiscount);
   const winnerMemberId = winnersByRound[roundKey] ?? '';
-  const memberAmounts = memberAmountsByRound[roundKey] ?? {};
-  const memberAdminFees = adminFeesByRound[roundKey] ?? {};
-  const remainderMode = remainderModesByRound[roundKey] ?? 'dividend';
+  const paidMembers = paidMembersByRound[roundKey] ?? {};
+  const payers = payersByRound[roundKey] ?? {};
+  const remainderMode: AuctionRemainderMode = 'reserve';
+  const finalPayoutMember = getFinalPayoutMember(group);
+  const previousWinners = new Set(auctions.map((auction) => auction.winnerMemberId));
+  const eligibleMembers = members.filter((member) => !previousWinners.has(member.id));
   const savedRoundAmounts = new Map(
     group.payments
       .filter((payment) => payment.round === currentRound && payment.type === 'collection')
@@ -128,20 +130,25 @@ export default function AuctionScreen() {
   const setWinningDiscount = (discount: string) => {
     setDiscountsByRound((current) => ({ ...current, [roundKey]: discount }));
   };
-  const setMemberAmount = (memberId: string, amount: string) => {
+  const setMemberPaid = (memberId: string, isPaid: boolean) => {
     setFormError('');
     setCollectionMessage('');
-    setMemberAmountsByRound((current) => ({
+    setPaidMembersByRound((current) => ({
       ...current,
-      [roundKey]: { ...current[roundKey], [memberId]: amount },
+      [roundKey]: { ...current[roundKey], [memberId]: isPaid },
     }));
+    if (isPaid && !payers[memberId]) {
+      const member = members.find((item) => item.id === memberId);
+      setPayersByRound((current) => ({
+        ...current,
+        [roundKey]: { ...current[roundKey], [memberId]: member?.name ?? '' },
+      }));
+    }
   };
-  const setMemberAdminFee = (memberId: string, amount: string) => {
-    setFormError('');
-    setCollectionMessage('');
-    setAdminFeesByRound((current) => ({
+  const setPayerName = (memberId: string, value: string) => {
+    setPayersByRound((current) => ({
       ...current,
-      [roundKey]: { ...current[roundKey], [memberId]: amount },
+      [roundKey]: { ...current[roundKey], [memberId]: value },
     }));
   };
 
@@ -149,8 +156,9 @@ export default function AuctionScreen() {
     setFormError('');
     const contributions = members.map((member) => ({
       memberId: member.id,
-      amount: Number(memberAmounts[member.id] ?? savedRoundAmounts.get(member.id) ?? 0) || 0,
-      adminFeeAmount: Number(memberAdminFees[member.id] ?? savedAdminFees.get(member.id) ?? 0) || 0,
+      amount: (paidMembers[member.id] ?? ((savedRoundAmounts.get(member.id) ?? 0) >= settlement.effectiveContribution)) ? settlement.effectiveContribution : 0,
+      adminFeeAmount: (paidMembers[member.id] ?? ((savedAdminFees.get(member.id) ?? 0) >= adminFeePerMember)) ? adminFeePerMember : 0,
+      paidByName: payers[member.id] || member.name,
     }));
     if (!recordRoundContributions(group.id, currentRound, contributions)) {
       setFormError('Could not save collections. Check your admin access and the member amounts.');
@@ -162,17 +170,13 @@ export default function AuctionScreen() {
   const saveAuction = () => {
     setFormError('');
     const discount = Number(winningDiscount);
-    const previousWinners = new Set(auctions.map((auction) => auction.winnerMemberId));
-    const eligibleMembers = group.chitType === 'lucky-draw'
-      ? members.filter((member) => !previousWinners.has(member.id))
-      : members;
-    const selectedWinnerMemberId = winnerMemberId || (group.chitType === 'lucky-draw' ? '' : members[0]?.id);
+    const selectedWinnerMemberId = winnerMemberId || eligibleMembers[0]?.id;
     if (!selectedWinnerMemberId) {
       setFormError('Choose the member who won this auction.');
       return;
     }
     if (!eligibleMembers.some((member) => member.id === selectedWinnerMemberId)) {
-      setFormError('This member already won a previous draw. Select someone who has not won yet.');
+      setFormError('This member has already received a chit payout. Choose a member who has not won.');
       return;
     }
     const grossPot = group.totalAmount + (group.carryForwardBalance ?? 0);
@@ -190,25 +194,6 @@ export default function AuctionScreen() {
       setFormError('Enter a valid auction date in YYYY-MM-DD format.');
       return;
     }
-    const invalidContribution = Object.entries(memberAmounts).find(([, rawAmount]) => {
-      const amount = Number(rawAmount) || 0;
-      return !Number.isSafeInteger(amount) || amount < 0 || amount > group.monthlyContribution;
-    });
-    if (invalidContribution) {
-      const member = members.find((item) => item.id === invalidContribution[0]);
-      setFormError(`${member?.name ?? 'A member'} collection cannot exceed the monthly contribution of ₹${group.monthlyContribution.toLocaleString('en-IN')}.`);
-      return;
-    }
-    const expectedAdminFee = getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, currentRound);
-    const invalidAdminFee = Object.entries(memberAdminFees).find(([, rawAmount]) => {
-      const amount = Number(rawAmount) || 0;
-      return !Number.isSafeInteger(amount) || amount < 0 || amount > expectedAdminFee;
-    });
-    if (invalidAdminFee) {
-      const member = members.find((item) => item.id === invalidAdminFee[0]);
-      setFormError(`${member?.name ?? 'A member'} admin fee cannot exceed ₹${expectedAdminFee.toLocaleString('en-IN')}.`);
-      return;
-    }
     const auction = recordAuction(group.id, {
       date: auctionDate,
       winnerMemberId: selectedWinnerMemberId,
@@ -216,8 +201,9 @@ export default function AuctionScreen() {
       remainderMode,
       memberContributions: members.map((member) => ({
         memberId: member.id,
-        amount: Number(memberAmounts[member.id] ?? savedRoundAmounts.get(member.id) ?? 0) || 0,
-        adminFeeAmount: Number(memberAdminFees[member.id] ?? savedAdminFees.get(member.id) ?? 0) || 0,
+        amount: (paidMembers[member.id] ?? ((savedRoundAmounts.get(member.id) ?? 0) >= settlement.effectiveContribution)) ? settlement.effectiveContribution : 0,
+        adminFeeAmount: (paidMembers[member.id] ?? ((savedAdminFees.get(member.id) ?? 0) >= adminFeePerMember)) ? adminFeePerMember : 0,
+        paidByName: payers[member.id] || member.name,
       })),
     });
     if (!auction) {
@@ -225,6 +211,23 @@ export default function AuctionScreen() {
       return;
     }
     setReportSelection({ type: 'round', round: auction.round });
+    setAuctionDate(getTodayDate());
+  };
+
+  const saveFinalPayout = () => {
+    setFormError('');
+    if (!finalPayoutMember) return;
+    const feeAmounts = members.map((member) => ({
+      memberId: member.id,
+      amount: (paidMembers[member.id] ?? ((savedAdminFees.get(member.id) ?? 0) >= adminFeePerMember)) ? adminFeePerMember : 0,
+      paidByName: payers[member.id] || member.name,
+    }));
+    const result = recordFinalPayout(group.id, auctionDate, feeAmounts);
+    if (!result) {
+      setFormError('The final chit payout could not be recorded. Verify the reserve balance and group admin access.');
+      return;
+    }
+    setReportSelection({ type: 'round', round: result.round });
     setAuctionDate(getTodayDate());
   };
 
@@ -242,17 +245,14 @@ export default function AuctionScreen() {
     remainderMode,
   });
   const adminFeePerMember = getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, currentRound);
-  const eligibleDrawMembers = members.filter(
-    (member) => !auctions.some((auction) => auction.winnerMemberId === member.id),
-  );
   const raiseDiscount = () => {
     const startingDiscount = currentDiscountValue || group.minimumBidDiscount;
     const nextDiscount = startingDiscount + group.bidIncrement;
     if (nextDiscount <= Math.floor(grossPot * 0.3)) setWinningDiscount(String(nextDiscount));
   };
   const drawEligibleWinner = () => {
-    if (eligibleDrawMembers.length === 0) return;
-    const pick = eligibleDrawMembers[pickRandomIndex(eligibleDrawMembers.length)];
+    if (eligibleMembers.length === 0) return;
+    const pick = eligibleMembers[pickRandomIndex(eligibleMembers.length)];
     setWinnerMemberId(pick.id);
   };
 
@@ -276,13 +276,73 @@ export default function AuctionScreen() {
         <Text style={[styles.muted, { color: palette.muted }]}>
           ₹{group.monthlyContribution.toLocaleString('en-IN')} base per member/month · ₹{grossPot.toLocaleString('en-IN')} available pot this round
         </Text>
-        {(group.carryForwardBalance > 0 || group.reserveBalance > 0) && (
-          <Text style={[styles.muted, { color: palette.muted }]}>
-            Carried into this round ₹{group.carryForwardBalance.toLocaleString('en-IN')} · Group reserve ₹{group.reserveBalance.toLocaleString('en-IN')}
-          </Text>
+        <Text style={[styles.muted, { color: palette.muted }]}>
+          Carried into this round ₹{group.carryForwardBalance.toLocaleString('en-IN')} · Accumulated discount balance ₹{group.reserveBalance.toLocaleString('en-IN')}
+        </Text>
+
+        {isAdmin && canRecordAuction && finalPayoutMember && (
+          <View style={[styles.card, { backgroundColor: palette.primarySoft, borderColor: palette.primary }]}>
+            <Text style={[styles.sectionTitle, { color: palette.primary }]}>Final member payout · Round {currentRound}</Text>
+            <Text style={[styles.helpText, { color: palette.text }]}>
+              {finalPayoutMember.name} is the only member who has not received a payout. The accumulated balance covers the ₹{group.totalAmount.toLocaleString('en-IN')} chit amount, so no member contributes to the chit this round.
+            </Text>
+            <Text style={[styles.historyWinner, { color: palette.primary }]}>
+              {finalPayoutMember.name} receives {formatCurrency(group.totalAmount)}
+            </Text>
+            <Text style={[styles.helpText, { color: palette.muted }]}>
+              Balance remaining after payout: {formatCurrency(group.reserveBalance - group.totalAmount)}. Optional admin fees remain separate from the chit payout.
+            </Text>
+            <Text style={[styles.label, { color: palette.muted }]}>Payout date</Text>
+            <TextInput
+              accessibilityLabel="Final payout date"
+              value={auctionDate}
+              onChangeText={setAuctionDate}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor={palette.muted}
+              style={[styles.input, { backgroundColor: palette.card, borderColor: palette.border, color: palette.text }]}
+            />
+            {adminFeePerMember > 0 && (
+              <>
+                <Text style={[styles.label, { color: palette.muted }]}>Optional admin fees</Text>
+                <Text style={[styles.helpText, { color: palette.muted }]}>
+                  These are separate from contributions waived for this final payout round.
+                </Text>
+                {members.map((member) => {
+                  const feePaid = paidMembers[member.id] ?? ((savedAdminFees.get(member.id) ?? 0) >= adminFeePerMember);
+                  return (
+                    <View key={member.id} style={[styles.paymentChoice, { backgroundColor: palette.card, borderColor: palette.border }]}>
+                      <TouchableOpacity
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: feePaid }}
+                        onPress={() => setMemberPaid(member.id, !feePaid)}
+                        style={styles.paymentMemberDetails}
+                      >
+                        <Text style={[styles.paymentMember, { color: palette.text }]}>{feePaid ? '☑' : '☐'} {member.name}</Text>
+                        <Text style={[styles.paymentStatus, { color: feePaid ? palette.primary : palette.muted }]}>
+                          Admin fee · {formatCurrency(adminFeePerMember)}
+                        </Text>
+                      </TouchableOpacity>
+                      {feePaid && (
+                        <TextInput
+                          accessibilityLabel={`${member.name} admin fee paid by`}
+                          value={payers[member.id] ?? member.name}
+                          onChangeText={(value) => setPayerName(member.id, value)}
+                          placeholder="Who paid?"
+                          placeholderTextColor={palette.muted}
+                          style={[styles.amountInput, { backgroundColor: palette.softBg, borderColor: palette.border, color: palette.text }]}
+                        />
+                      )}
+                    </View>
+                  );
+                })}
+              </>
+            )}
+            {formError ? <Text accessibilityRole="alert" style={styles.errorText}>{formError}</Text> : null}
+            <Button label="Record final member payout" onPress={saveFinalPayout} palette={palette} />
+          </View>
         )}
 
-        {isAdmin && canRecordAuction && (
+        {isAdmin && canRecordAuction && !finalPayoutMember && (
           <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }]}>
             <Text style={[styles.sectionTitle, { color: palette.text }]}>
               {group.chitType === 'auction' ? 'Run auction' : group.chitType === 'fixed-discount' ? 'Record fixed-discount round' : 'Run lucky draw'} · Round {currentRound}
@@ -300,18 +360,18 @@ export default function AuctionScreen() {
               style={[styles.input, { backgroundColor: palette.softBg, borderColor: palette.border, color: palette.text }]}
             />
             <Text style={[styles.label, { color: palette.muted }]}>
-              {group.chitType === 'lucky-draw' ? 'Draw a member who has not won yet' : 'Select the winning member'}
+              {group.chitType === 'lucky-draw' ? 'Draw a member who has not received a payout yet' : 'Select a member who has not received a payout'}
             </Text>
             {group.chitType === 'lucky-draw' && (
               <Button
-                label={eligibleDrawMembers.length > 0 ? 'Draw winner at random' : 'All members have won'}
+                label={eligibleMembers.length > 0 ? 'Draw winner at random' : 'All members have received a payout'}
                 onPress={drawEligibleWinner}
                 palette={palette}
-                disabled={eligibleDrawMembers.length === 0}
+                disabled={eligibleMembers.length === 0}
               />
             )}
             <View style={styles.memberPicker}>
-              {(group.chitType === 'lucky-draw' ? eligibleDrawMembers : members).map((member) => (
+              {eligibleMembers.map((member) => (
                 <TouchableOpacity
                   accessibilityRole="radio"
                   accessibilityState={{ checked: winnerMemberId === member.id }}
@@ -374,6 +434,8 @@ export default function AuctionScreen() {
               <SettlementLine label="Winning discount" value={settlement.winningDiscount} palette={palette} />
               <SettlementLine label="Agent / foreman fee" value={settlement.foremanCommission} palette={palette} />
               <SettlementLine label="Discount remainder after agent fee" value={settlement.remainingAmount} palette={palette} />
+              <SettlementLine label="Previously accumulated discount balance" value={group.reserveBalance} palette={palette} />
+              <SettlementLine label="Accumulated balance after this round" value={group.reserveBalance + settlement.reserveAmount} palette={palette} />
               {adminFeePerMember > 0 && (
                 <SettlementLine
                   label={`Admin fee · ₹${adminFeePerMember.toLocaleString('en-IN')} per member (separate)`}
@@ -392,87 +454,51 @@ export default function AuctionScreen() {
               <SettlementLine label="Winner receives" value={settlement.winnerPayout} palette={palette} strong />
             </View>
 
-            <Text style={[styles.label, { color: palette.muted }]}>How should the discount remainder be used?</Text>
+            <Text style={[styles.label, { color: palette.muted }]}>Accumulated discount rule</Text>
             <Text style={[styles.helpText, { color: palette.muted }]}>
-              Choose how to use ₹{settlement.remainingAmount.toLocaleString('en-IN')} remaining after the agent fee. This choice is saved with the round.
+              The ₹{settlement.remainingAmount.toLocaleString('en-IN')} remainder is added to the group balance. When it covers the chit amount and one member is still waiting for a payout, that member receives the final payout and member contributions are waived for that round.
             </Text>
-            <View style={styles.remainderChoices}>
-              {([
-                ['dividend', 'Give as dividend', 'Reduce this round’s member dues.'],
-                ['carry-forward', 'Add to next pot', 'Carry the amount into next month’s auction pot.'],
-                ['reserve', 'Keep in reserve', 'Keep it separate from future auction pots.'],
-              ] as const)
-                .filter(([mode]) => mode !== 'carry-forward' || currentRound < group.instalmentCount)
-                .map(([mode, label, detail]) => (
-                <TouchableOpacity
-                  key={mode}
-                  accessibilityRole="radio"
-                  accessibilityState={{ checked: remainderMode === mode }}
-                  onPress={() => setRemainderModesByRound((current) => ({ ...current, [roundKey]: mode }))}
-                  style={[
-                    styles.remainderChoice,
-                    {
-                      backgroundColor: remainderMode === mode ? palette.primarySoft : palette.softBg,
-                      borderColor: remainderMode === mode ? palette.primary : palette.border,
-                    },
-                  ]}
-                >
-                  <Text style={[styles.remainderTitle, { color: remainderMode === mode ? palette.primary : palette.text }]}>{label}</Text>
-                  <Text style={[styles.remainderDetail, { color: palette.muted }]}>{detail}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <Text style={[styles.label, { color: palette.muted }]}>Record each member’s contribution</Text>
+            <Text style={[styles.label, { color: palette.muted }]}>Mark member payments</Text>
             <Text style={[styles.helpText, { color: palette.muted }]}>
-              Base due after dividend is ₹{settlement.effectiveContribution.toLocaleString('en-IN')} per member. The separate admin fee is ₹{adminFeePerMember.toLocaleString('en-IN')}. Record each amount separately; you can save collections before recording the winner.
+              Check a member only after the full calculated amount is received. Base contribution: {formatCurrency(settlement.effectiveContribution)}; separate admin fee: {formatCurrency(adminFeePerMember)}. Enter another payer’s name when someone pays on a member’s behalf.
             </Text>
             {members.map((member) => {
-              const amount = Number(memberAmounts[member.id] ?? savedRoundAmounts.get(member.id) ?? 0) || 0;
-              const feeAmount = Number(memberAdminFees[member.id] ?? savedAdminFees.get(member.id) ?? 0) || 0;
-              const isPaid = amount >= settlement.effectiveContribution
-                && feeAmount >= adminFeePerMember
-                && (settlement.effectiveContribution > 0 || adminFeePerMember > 0);
+              const isPaid = paidMembers[member.id] ?? (
+                (savedRoundAmounts.get(member.id) ?? 0) >= settlement.effectiveContribution
+                && (savedAdminFees.get(member.id) ?? 0) >= adminFeePerMember
+                && (settlement.effectiveContribution > 0 || adminFeePerMember > 0)
+              );
+              const savedPayer = group.payments.find((payment) =>
+                payment.round === currentRound
+                && payment.memberId === member.id
+                && (payment.type === 'collection' || payment.type === 'admin-fee'),
+              )?.paidByName;
               return (
                 <View
                   key={member.id}
                   style={[styles.paymentChoice, { backgroundColor: palette.softBg, borderColor: palette.border }]}
                 >
-                  <View style={styles.paymentMemberDetails}>
-                    <Text style={[styles.paymentMember, { color: palette.text }]}>{member.name}</Text>
+                  <TouchableOpacity
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: isPaid }}
+                    onPress={() => setMemberPaid(member.id, !isPaid)}
+                    style={styles.paymentMemberDetails}
+                  >
+                    <Text style={[styles.paymentMember, { color: palette.text }]}>{isPaid ? '☑' : '☐'} {member.name}</Text>
                     <Text style={[styles.paymentStatus, { color: isPaid ? palette.primary : palette.muted }]}>
-                      {isPaid ? 'Paid in full' : amount + feeAmount > 0 ? `Paid · ₹${(amount + feeAmount).toLocaleString('en-IN')}` : 'Not paid'}
+                      {isPaid ? 'Paid' : 'Not paid'} · {formatCurrency(settlement.effectiveContribution + adminFeePerMember)}
                     </Text>
-                    {adminFeePerMember > 0 && (
-                      <Text style={[styles.paymentStatus, { color: palette.muted }]}>
-                        Admin fee due · ₹{adminFeePerMember.toLocaleString('en-IN')}
-                      </Text>
-                    )}
-                  </View>
-                  <View style={styles.paymentInputs}>
+                  </TouchableOpacity>
+                  {isPaid && (
                     <TextInput
-                      accessibilityLabel={`${member.name} contribution amount`}
-                      accessibilityHint={`Enter the base chit contribution collected from this member, up to ₹${group.monthlyContribution}`}
-                      value={memberAmounts[member.id] ?? String(savedRoundAmounts.get(member.id) ?? '')}
-                      onChangeText={(value) => setMemberAmount(member.id, value.replace(/[^\d]/g, ''))}
-                      keyboardType="number-pad"
-                      placeholder={`Base ₹${group.monthlyContribution}`}
+                      accessibilityLabel={`${member.name} paid by`}
+                      value={payers[member.id] ?? savedPayer ?? member.name}
+                      onChangeText={(value) => setPayerName(member.id, value)}
+                      placeholder="Who paid?"
                       placeholderTextColor={palette.muted}
                       style={[styles.amountInput, { backgroundColor: palette.card, borderColor: palette.border, color: palette.text }]}
                     />
-                    {adminFeePerMember > 0 && (
-                      <TextInput
-                        accessibilityLabel={`${member.name} admin fee amount`}
-                        accessibilityHint={`Enter the separate admin fee collected from this member, up to ₹${adminFeePerMember}`}
-                        value={memberAdminFees[member.id] ?? String(savedAdminFees.get(member.id) ?? '')}
-                        onChangeText={(value) => setMemberAdminFee(member.id, value.replace(/[^\d]/g, ''))}
-                        keyboardType="number-pad"
-                        placeholder={`Fee ₹${adminFeePerMember}`}
-                        placeholderTextColor={palette.muted}
-                        style={[styles.amountInput, { backgroundColor: palette.card, borderColor: palette.border, color: palette.text }]}
-                      />
-                    )}
-                  </View>
+                  )}
                 </View>
               );
             })}
@@ -480,7 +506,7 @@ export default function AuctionScreen() {
             {collectionMessage ? (
               <Text accessibilityRole="status" style={[styles.successText, { color: palette.primary }]}>{collectionMessage}</Text>
             ) : null}
-            <Button label="Save round contributions" onPress={saveContributions} palette={palette} />
+            <Button label="Save payment checkboxes" onPress={saveContributions} palette={palette} />
             {formError ? <Text accessibilityRole="alert" style={styles.errorText}>{formError}</Text> : null}
             <Button label="Save auction result & start next round" onPress={saveAuction} palette={palette} />
           </View>
@@ -518,9 +544,10 @@ export default function AuctionScreen() {
                   key={auction.id}
                   auction={auction}
                   members={members}
+                  payments={group.payments.filter((payment) => payment.round === auction.round)}
                   contribution={group.monthlyContribution}
                   adminFeePerMember={getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, auction.round)}
-                  editable={isAdmin}
+                  editable={isAdmin && auction.outcomeType !== 'final-payout'}
                   onTogglePaid={(memberId, isPaid) => {
                     if (!setAuctionMemberPaid(group.id, auction.id, memberId, isPaid)) {
                       setReportError('Could not update this payment. Check that you are a group admin.');
@@ -582,6 +609,7 @@ export default function AuctionScreen() {
 function AuctionHistoryRow({
   auction,
   members,
+  payments,
   contribution,
   adminFeePerMember,
   editable,
@@ -591,6 +619,7 @@ function AuctionHistoryRow({
 }: {
   auction: AuctionRecord;
   members: Member[];
+  payments: PaymentRecord[];
   contribution: number;
   adminFeePerMember: number;
   editable: boolean;
@@ -603,21 +632,33 @@ function AuctionHistoryRow({
     <View style={[styles.historyCard, { backgroundColor: palette.softBg, borderColor: palette.border }]}>
       <View style={styles.historyTop}>
         <View style={{ flex: 1 }}>
-          <Text style={[styles.historyTitle, { color: palette.text }]}>Round {auction.round} · {formatReportDate(auction.date)}</Text>
+          <Text style={[styles.historyTitle, { color: palette.text }]}>
+            {auction.outcomeType === 'final-payout' ? 'Final payout' : 'Round'} {auction.round} · {formatReportDate(auction.date)}
+          </Text>
           <Text style={[styles.historyWinner, { color: palette.primary }]}>
-            {auction.winnerName} won · ₹{auction.payoutAmount.toLocaleString('en-IN')} payout
+            {auction.outcomeType === 'final-payout'
+              ? `${auction.winnerName} received the final chit balance · ${formatCurrency(auction.payoutAmount)}`
+              : `${auction.winnerName} won · ${formatCurrency(auction.payoutAmount)} payout`}
           </Text>
+          {auction.outcomeType !== 'final-payout' && (
+            <Text style={[styles.paymentSummary, { color: palette.muted }]}>
+              {formatCurrency(auction.winningDiscount)} discount · {formatCurrency(auction.foremanCommission)} agent fee · {formatCurrency(auction.adminFeeCollected)} admin fee collected
+            </Text>
+          )}
           <Text style={[styles.paymentSummary, { color: palette.muted }]}>
-            ₹{auction.winningDiscount.toLocaleString('en-IN')} discount · ₹{auction.foremanCommission.toLocaleString('en-IN')} agent fee · ₹{auction.adminFeeCollected.toLocaleString('en-IN')} admin fee collected · ₹{auction.dividendPerMember.toLocaleString('en-IN')} dividend/member
+            {auction.outcomeType === 'final-payout'
+              ? `All chit contributions waived · Remaining balance ${formatCurrency(auction.reserveBalanceAfter ?? 0)}`
+              : `${formatCurrency(auction.remainingAmount)} remainder · ${auction.remainderMode === 'dividend' ? 'dividend' : auction.remainderMode === 'carry-forward' ? `${formatCurrency(auction.carryForwardAmount)} carried forward` : `${formatCurrency(auction.reserveAmount)} added to accumulated balance`}`}
           </Text>
-          <Text style={[styles.paymentSummary, { color: palette.muted }]}>
-            ₹{auction.remainingAmount.toLocaleString('en-IN')} remainder · {auction.remainderMode === 'dividend' ? 'dividend' : auction.remainderMode === 'carry-forward' ? `₹${auction.carryForwardAmount.toLocaleString('en-IN')} carried forward` : `₹${auction.reserveAmount.toLocaleString('en-IN')} kept in reserve`}
-          </Text>
-          <Text style={[styles.paymentSummary, { color: summary.allPaid ? palette.primary : palette.danger }]}>
-            {summary.allPaid
-              ? 'All members paid'
-              : `${summary.paidCount}/${members.length} paid · Not paid: ${summary.unpaidMembers.map((member) => member.name).join(', ')}`}
-          </Text>
+          {auction.outcomeType === 'final-payout' ? (
+            <Text style={[styles.paymentSummary, { color: palette.primary }]}>No chit contributions collected this round.</Text>
+          ) : (
+            <Text style={[styles.paymentSummary, { color: summary.allPaid ? palette.primary : palette.danger }]}>
+              {summary.allPaid
+                ? 'All members paid'
+                : `${summary.paidCount}/${members.length} paid · Not paid: ${summary.unpaidMembers.map((member) => member.name).join(', ')}`}
+            </Text>
+          )}
         </View>
         <TouchableOpacity accessibilityRole="button" onPress={onExport} style={[styles.roundExportButton, { borderColor: palette.primary }]}>
           <Text style={{ color: palette.primary, fontWeight: '700' }}>Round JPG</Text>
@@ -627,6 +668,8 @@ function AuctionHistoryRow({
         {members.map((member) => {
           const paid = auction.paidMemberIds.includes(member.id);
           const amount = auction.contributions?.find((item) => item.memberId === member.id)?.amount ?? (paid ? contribution - auction.dividendPerMember : 0);
+          const payment = payments.find((item) => item.memberId === member.id && item.type === 'collection');
+          const waived = auction.waivedContributionMemberIds?.includes(member.id) ?? false;
           return (
             <TouchableOpacity
               key={member.id}
@@ -637,9 +680,14 @@ function AuctionHistoryRow({
               style={[styles.historyMemberRow, { borderTopColor: palette.border }]}
             >
               <Text style={[styles.historyMemberName, { color: palette.text }]}>{member.name}</Text>
-              <Text style={{ color: paid ? palette.primary : palette.danger, fontWeight: '700' }}>
-                {paid ? 'Paid' : amount > 0 ? `Partial ₹${amount.toLocaleString('en-IN')}` : 'Not paid'} · ₹{(contribution - auction.dividendPerMember + adminFeePerMember).toLocaleString('en-IN')} due
+              <Text style={{ color: waived || paid ? palette.primary : palette.danger, fontWeight: '700' }}>
+                {waived
+                  ? 'Contribution waived'
+                  : `${paid ? 'Paid' : amount > 0 ? `Partial ${formatCurrency(amount)}` : 'Not paid'} · ${formatCurrency(contribution - auction.dividendPerMember + adminFeePerMember)} due`}
               </Text>
+              {payment?.paidByName && payment.paidByName !== member.name && (
+                <Text style={{ color: palette.muted, fontSize: 12 }}>Paid by {payment.paidByName} for {member.name}</Text>
+              )}
             </TouchableOpacity>
           );
         })}
@@ -674,6 +722,9 @@ function ReportImage({
       <Text style={reportStyles.meta}>
         {getChitTypeLabel(group.chitType)} · {group.managementMode === 'agent-managed' ? `Agent fee ${group.foremanCommissionPercent}%` : 'Self-managed'}
       </Text>
+      <Text style={reportStyles.meta}>
+        Current accumulated discount balance: {formatCurrency(group.reserveBalance)}
+      </Text>
       <View style={reportStyles.rule} />
       {auctions.map((auction) => (
         <ReportAuction
@@ -682,7 +733,7 @@ function ReportImage({
           members={members}
           contribution={group.monthlyContribution}
           adminFeePerMember={getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, auction.round)}
-          adminFeePayments={group.payments.filter((payment) => payment.round === auction.round && payment.type === 'admin-fee')}
+          roundPayments={group.payments.filter((payment) => payment.round === auction.round)}
         />
       ))}
       {singleRound && auctions[0] && (
@@ -693,7 +744,7 @@ function ReportImage({
           <Text style={reportStyles.sectionHeading}>Recorded chit winners</Text>
           {allAuctions.map((auction) => (
             <Text key={auction.id} style={reportStyles.previousWinner}>
-              Round {auction.round} · {formatReportDate(auction.date)} · {auction.winnerName} · ₹{auction.payoutAmount.toLocaleString('en-IN')}
+              Round {auction.round} · {formatReportDate(auction.date)} · {auction.outcomeType === 'final-payout' ? 'Final payout' : 'Auction'} · {auction.winnerName} · {formatCurrency(auction.payoutAmount)}
             </Text>
           ))}
         </View>
@@ -708,37 +759,54 @@ function ReportAuction({
   members,
   contribution,
   adminFeePerMember,
-  adminFeePayments,
+  roundPayments,
 }: {
   auction: AuctionRecord;
   members: Member[];
   contribution: number;
   adminFeePerMember: number;
-  adminFeePayments: PaymentRecord[];
+  roundPayments: PaymentRecord[];
 }) {
   const summary = getAuctionPaymentSummary(auction, members);
   return (
     <View style={reportStyles.auctionBlock}>
-      <Text style={reportStyles.sectionHeading}>Auction · Round {auction.round}</Text>
+      <Text style={reportStyles.sectionHeading}>{auction.outcomeType === 'final-payout' ? 'Final member payout' : 'Auction'} · Round {auction.round}</Text>
       <Text style={reportStyles.info}>Date: {formatReportDate(auction.date)}</Text>
-      <Text style={reportStyles.info}>Winner: {auction.winnerName}</Text>
-      <Text style={reportStyles.info}>Winning discount: ₹{auction.winningDiscount.toLocaleString('en-IN')}</Text>
-      <Text style={reportStyles.info}>Agent / foreman commission: ₹{auction.foremanCommission.toLocaleString('en-IN')}</Text>
-      <Text style={reportStyles.info}>Admin fee collected: ₹{auction.adminFeeCollected.toLocaleString('en-IN')}</Text>
-      <Text style={reportStyles.info}>Dividend per member: ₹{auction.dividendPerMember.toLocaleString('en-IN')}</Text>
-      <Text style={reportStyles.info}>
-        Remainder: ₹{auction.remainingAmount.toLocaleString('en-IN')} · {auction.remainderMode === 'dividend' ? 'distributed as dividend' : auction.remainderMode === 'carry-forward' ? `₹${auction.carryForwardAmount.toLocaleString('en-IN')} carried forward` : `₹${auction.reserveAmount.toLocaleString('en-IN')} in reserve`}
-      </Text>
-      <Text style={reportStyles.info}>Payout received: ₹{auction.payoutAmount.toLocaleString('en-IN')}</Text>
-      <Text style={reportStyles.info}>
-        Contributions: {summary.allPaid
-          ? 'All members paid'
-          : `${summary.paidCount} paid · ${summary.unpaidMembers.length} not paid`}
-      </Text>
-      {summary.unpaidMembers.length > 0 && (
-        <Text style={reportStyles.unpaid}>Not paid: {summary.unpaidMembers.map((member) => member.name).join(', ')}</Text>
+      <Text style={reportStyles.info}>{auction.outcomeType === 'final-payout' ? 'Final recipient' : 'Winner'}: {auction.winnerName}</Text>
+      {auction.outcomeType !== 'final-payout' && (
+        <>
+          <Text style={reportStyles.info}>Winning discount: {formatCurrency(auction.winningDiscount)}</Text>
+          <Text style={reportStyles.info}>Agent / foreman commission: {formatCurrency(auction.foremanCommission)}</Text>
+        </>
       )}
-      {summary.allPaid && <Text style={reportStyles.paid}>Payment status: Paid in full</Text>}
+      <Text style={reportStyles.info}>Admin fee collected: ₹{auction.adminFeeCollected.toLocaleString('en-IN')}</Text>
+      {auction.outcomeType !== 'final-payout' && (
+        <>
+          <Text style={reportStyles.info}>Dividend per member: {formatCurrency(auction.dividendPerMember)}</Text>
+          <Text style={reportStyles.info}>
+            Remainder: {formatCurrency(auction.remainingAmount)} · {auction.remainderMode === 'dividend' ? 'distributed as dividend' : auction.remainderMode === 'carry-forward' ? `${formatCurrency(auction.carryForwardAmount)} carried forward` : `${formatCurrency(auction.reserveAmount)} added to chit balance`}
+          </Text>
+        </>
+      )}
+      <Text style={reportStyles.info}>Payout received: {formatCurrency(auction.payoutAmount)}</Text>
+      {auction.outcomeType === 'final-payout' && (
+        <Text style={reportStyles.info}>Member contributions waived this round. Balance after payout: {formatCurrency(auction.reserveBalanceAfter ?? 0)}</Text>
+      )}
+      {auction.outcomeType === 'final-payout' ? (
+        <Text style={reportStyles.paid}>Contributions waived for all members this round.</Text>
+      ) : (
+        <>
+          <Text style={reportStyles.info}>
+            Contributions: {summary.allPaid
+              ? 'All members paid'
+              : `${summary.paidCount} paid · ${summary.unpaidMembers.length} not paid`}
+          </Text>
+          {summary.unpaidMembers.length > 0 && (
+            <Text style={reportStyles.unpaid}>Not paid: {summary.unpaidMembers.map((member) => member.name).join(', ')}</Text>
+          )}
+          {summary.allPaid && <Text style={reportStyles.paid}>Payment status: Paid in full</Text>}
+        </>
+      )}
       <View style={reportStyles.tableHeader}>
         <Text style={[reportStyles.tableCell, reportStyles.memberColumn, reportStyles.tableHeaderText]}>Member</Text>
         <Text style={[reportStyles.tableCell, reportStyles.amountColumn, reportStyles.tableHeaderText]}>Paid / due</Text>
@@ -748,11 +816,18 @@ function ReportAuction({
         <View key={member.id} style={reportStyles.tableRow}>
           <Text style={[reportStyles.tableCell, reportStyles.memberColumn]}>{member.name}</Text>
           <Text style={[reportStyles.tableCell, reportStyles.amountColumn]}>
-            ₹{(auction.contributions?.find((item) => item.memberId === member.id)?.amount ?? (auction.paidMemberIds.includes(member.id) ? contribution - auction.dividendPerMember : 0)).toLocaleString('en-IN')} / ₹{(contribution - auction.dividendPerMember).toLocaleString('en-IN')}
-            {adminFeePerMember > 0 ? `\nFee ₹${(adminFeePayments.find((payment) => payment.memberId === member.id)?.amount ?? 0).toLocaleString('en-IN')} / ₹${adminFeePerMember.toLocaleString('en-IN')}` : ''}
+            {auction.waivedContributionMemberIds?.includes(member.id)
+              ? '₹0 / ₹0'
+              : `${formatCurrency(auction.contributions?.find((item) => item.memberId === member.id)?.amount ?? (auction.paidMemberIds.includes(member.id) ? contribution - auction.dividendPerMember : 0))} / ${formatCurrency(contribution - auction.dividendPerMember)}`}
+            {adminFeePerMember > 0 ? `\nFee ${formatCurrency(roundPayments.find((payment) => payment.memberId === member.id && payment.type === 'admin-fee')?.amount ?? 0)} / ${formatCurrency(adminFeePerMember)}` : ''}
           </Text>
-          <Text style={[reportStyles.tableCell, reportStyles.statusColumn, auction.paidMemberIds.includes(member.id) ? reportStyles.paid : reportStyles.unpaid]}>
-            {auction.paidMemberIds.includes(member.id) ? 'Paid' : 'Not paid'}
+          <Text style={[reportStyles.tableCell, reportStyles.statusColumn, auction.waivedContributionMemberIds?.includes(member.id) || auction.paidMemberIds.includes(member.id) ? reportStyles.paid : reportStyles.unpaid]}>
+            {auction.waivedContributionMemberIds?.includes(member.id)
+              ? 'Waived'
+              : auction.paidMemberIds.includes(member.id) ? 'Paid' : 'Not paid'}
+            {roundPayments.find((payment) => payment.memberId === member.id && payment.type === 'collection')?.paidByName
+              ? `\nby ${roundPayments.find((payment) => payment.memberId === member.id && payment.type === 'collection')?.paidByName}`
+              : ''}
           </Text>
         </View>
       ))}
@@ -768,7 +843,7 @@ function PreviousWinners({ group, round }: { group: Group; round: number }) {
       {previous.length > 0
         ? previous.map((auction) => (
           <Text key={auction.id} style={reportStyles.previousWinner}>
-            Round {auction.round} · {formatReportDate(auction.date)} · {auction.winnerName} · ₹{auction.payoutAmount.toLocaleString('en-IN')}
+            Round {auction.round} · {formatReportDate(auction.date)} · {auction.outcomeType === 'final-payout' ? 'Final payout' : 'Auction'} · {auction.winnerName} · {formatCurrency(auction.payoutAmount)}
           </Text>
         ))
         : <Text style={reportStyles.info}>No earlier auctions recorded.</Text>}
