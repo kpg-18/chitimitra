@@ -8,9 +8,11 @@ import {
   calculateGrossMonthlyChit,
   calculateOutstandingBalance,
   formatCurrency,
+  getFinalPayoutMember,
   getAdminFeePerMemberForRound,
   getCollectionSummary,
   getExpectedGroupCollections,
+  hasOnePayoutPerMemberSchedule,
 } from './finance';
 
 describe('financial formulas', () => {
@@ -28,6 +30,12 @@ describe('financial formulas', () => {
       grossMonthlyPot: 100000,
       totalGroupContributions: 1000000,
     });
+  });
+
+  it('requires the round count to match the member count', () => {
+    expect(hasOnePayoutPerMemberSchedule(10, 10)).toBe(true);
+    expect(hasOnePayoutPerMemberSchedule(10, 9)).toBe(false);
+    expect(hasOnePayoutPerMemberSchedule(1, 1)).toBe(false);
   });
 
   it('rejects invalid chit terms and amounts that do not divide into whole rupees', () => {
@@ -129,6 +137,29 @@ describe('financial formulas', () => {
     });
   });
 
+  it('accumulates auction discount remainder without reducing the member contribution', () => {
+    const firstRound = calculateChitSettlement({
+      grossPot: 100000,
+      winningDiscount: 13000,
+      foremanCommission: 0,
+      memberCount: 10,
+      monthlyContribution: 10000,
+      remainderMode: 'reserve',
+    });
+    const secondRound = calculateChitSettlement({
+      grossPot: 100000,
+      winningDiscount: 17000,
+      foremanCommission: 0,
+      memberCount: 10,
+      monthlyContribution: 10000,
+      remainderMode: 'reserve',
+    });
+
+    expect(firstRound).toMatchObject({ winnerPayout: 87000, reserveAmount: 13000, effectiveContribution: 10000 });
+    expect(secondRound).toMatchObject({ winnerPayout: 83000, reserveAmount: 17000, effectiveContribution: 10000 });
+    expect(firstRound.reserveAmount + secondRound.reserveAmount).toBe(30000);
+  });
+
   it('charges monthly admin commission each round or one-time commission in round one', () => {
     expect(getAdminFeePerMemberForRound('monthly-per-member', 10, 3)).toBe(10);
     expect(getAdminFeePerMemberForRound('one-time-per-member', 100, 1)).toBe(100);
@@ -146,6 +177,43 @@ describe('financial formulas', () => {
       auctions: [{ round: 1, dividendPerMember: 100 }],
     };
     expect(getExpectedGroupCollections(group)).toBe(1000000);
+  });
+
+  it('finds the last unpaid recipient only when the accumulated balance covers the chit amount', () => {
+    const finalRoundGroup = {
+      members: [
+        { id: 'm1', name: 'Asha' },
+        { id: 'm2', name: 'Bala' },
+        { id: 'm3', name: 'Chitra' },
+      ],
+      auctions: [{ winnerMemberId: 'm1' }, { winnerMemberId: 'm2' }],
+      currentRound: 3,
+      instalmentCount: 3,
+      memberCount: 3,
+      reserveBalance: 100000,
+      totalAmount: 100000,
+    };
+
+    expect(getFinalPayoutMember(finalRoundGroup)?.id).toBe('m3');
+    expect(getFinalPayoutMember({ ...finalRoundGroup, reserveBalance: 99999 })).toBeNull();
+    expect(getFinalPayoutMember({ ...finalRoundGroup, auctions: [{ winnerMemberId: 'm1' }] })).toBeNull();
+  });
+
+  it('waives final-round member contributions while keeping separately scheduled admin fees due', () => {
+    const group = {
+      memberCount: 3,
+      monthlyContribution: 10000,
+      instalmentCount: 3,
+      adminFeeMode: 'monthly-per-member' as const,
+      adminFeeAmount: 10,
+      auctions: [
+        { round: 1, dividendPerMember: 0, waivedContributionMemberIds: [] },
+        { round: 2, dividendPerMember: 0, waivedContributionMemberIds: [] },
+        { round: 3, dividendPerMember: 0, waivedContributionMemberIds: ['m1', 'm2', 'm3'] },
+      ],
+    };
+
+    expect(getExpectedGroupCollections(group)).toBe(60090);
   });
 
   it('formats Indian currency', () => {
