@@ -1,18 +1,40 @@
-import { router } from 'expo-router';
-import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
-import { useColorScheme } from 'react-native';
-import { useAppContext } from '../src/context/AppContext';
+import { useState } from 'react';
+import { Redirect, router } from 'expo-router';
+import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View, useColorScheme } from 'react-native';
+import { AUTHENTICATION_ENABLED, useAppContext } from '../src/context/AppContext';
 import { getText } from '../src/lib/i18n';
 import type { Locale, ThemeMode } from '../src/types';
 
 export default function ProfileScreen() {
-  const { state, setTheme, setLocale } = useAppContext();
+  const { state, setTheme, setLocale, signOut, clearGuestProfile } = useAppContext();
+  const [authError, setAuthError] = useState('');
   const scheme = useColorScheme();
   const isDark = state.theme === 'dark' || (state.theme === 'system' && scheme === 'dark');
   const palette = isDark ? darkColors : lightColors;
+  const user = state.user;
 
   const toggleTheme = (mode: ThemeMode) => setTheme(mode);
   const toggleLang = (locale: Locale) => setLocale(locale);
+  const handleSignOut = async () => {
+    setAuthError('');
+    try {
+      await signOut();
+      router.replace('/');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not log out. Please try again.');
+    }
+  };
+  const handleChangeName = async () => {
+    setAuthError('');
+    try {
+      await clearGuestProfile();
+      router.replace('/auth');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not change your name. Please try again.');
+    }
+  };
+
+  if (!user) return <Redirect href="/auth" />;
 
   return (
     <View style={[styles.container, { backgroundColor: palette.bg }]}>
@@ -20,10 +42,36 @@ export default function ProfileScreen() {
         <Text style={[styles.header, { color: palette.text }]}>{getText(state.locale, 'profile')}</Text>
 
         <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }]}>
-          <View style={styles.avatar}><Text style={styles.avatarText}>{state.user.initials}</Text></View>
-          <Text style={[styles.name, { color: palette.text }]}>{state.user.name}</Text>
-          <Text style={[styles.subtle, { color: palette.muted }]}>{state.user.email}</Text>
+          <View style={styles.avatar}><Text style={styles.avatarText}>{user.initials}</Text></View>
+          <Text style={[styles.name, { color: palette.text }]}>{user.name}</Text>
+          <Text style={[styles.subtle, { color: palette.muted }]}>{user.email || 'Saved on this device'}</Text>
         </View>
+
+        {AUTHENTICATION_ENABLED ? (
+          <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }]}>
+            <Text style={[styles.section, { color: palette.text }]}>Account</Text>
+            {authError ? <Text style={styles.errorText}>{authError}</Text> : null}
+            <TouchableOpacity
+              accessibilityRole="button"
+              style={[styles.signOutButton, { borderColor: palette.border, backgroundColor: palette.softBg }]}
+              onPress={() => void handleSignOut()}
+            >
+              <Text style={[styles.signOutText, { color: palette.text }]}>Log out</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }]}>
+            <Text style={[styles.section, { color: palette.text }]}>Your profile</Text>
+            {authError ? <Text style={styles.errorText}>{authError}</Text> : null}
+            <TouchableOpacity
+              accessibilityRole="button"
+              style={[styles.signOutButton, { borderColor: palette.border, backgroundColor: palette.softBg }]}
+              onPress={() => void handleChangeName()}
+            >
+              <Text style={[styles.signOutText, { color: palette.text }]}>Change name</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={[styles.card, { backgroundColor: palette.card, borderColor: palette.border }]}>
           <Text style={[styles.section, { color: palette.text }]}>{getText(state.locale, 'language')}</Text>
@@ -111,6 +159,9 @@ const styles = StyleSheet.create({
   avatarText: { color: '#fff', fontSize: 20, fontWeight: '700' },
   name: { fontSize: 20, fontWeight: '700' },
   subtle: { fontSize: 13, marginTop: 6 },
+  errorText: { color: '#b42318', fontSize: 13, marginBottom: 10 },
+  signOutButton: { minHeight: 46, borderRadius: 12, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  signOutText: { fontSize: 14, fontWeight: '700' },
   section: { fontSize: 16, fontWeight: '700', marginBottom: 12 },
   toggleRow: { flexDirection: 'row', gap: 10 },
   option: { flex: 1, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
