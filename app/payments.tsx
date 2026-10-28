@@ -1,8 +1,8 @@
 import { router } from 'expo-router';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useColorScheme } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, useColorScheme } from 'react-native';
 import { useAppContext } from '../src/context/AppContext';
 import { formatCurrency } from '../src/lib/finance';
+import { canManageGroup, getMemberGroups } from '../src/lib/groupAccess';
 import { getText } from '../src/lib/i18n';
 
 export default function PaymentsScreen() {
@@ -11,18 +11,14 @@ export default function PaymentsScreen() {
   const isDark = state.theme === 'dark' || (state.theme === 'system' && scheme === 'dark');
   const palette = isDark ? darkColors : lightColors;
 
-  const visibleGroups = state.groups.filter((group) => group.members.some(
-    (member) => member.userId === state.user.id || (!member.userId && member.name === state.user.name),
-  ));
+  const user = state.user;
+  const visibleGroups = user ? getMemberGroups(state.groups, user.id, user.name) : [];
   const payments = visibleGroups.flatMap((group) =>
     group.payments.map((payment) => ({
       ...payment,
       groupId: group.id,
       groupName: group.name,
-      canVerify: group.members.some((member) =>
-        (member.userId === state.user.id || (!member.userId && member.name === state.user.name))
-        && (member.role === 'primary-admin' || member.role === 'admin'),
-      ),
+      canVerify: user ? canManageGroup(group, user.id, user.name) : false,
     })),
   );
 
@@ -39,7 +35,9 @@ export default function PaymentsScreen() {
                 <Text style={[styles.memberName, { color: palette.text }]}>{payment.memberName}</Text>
                 <Text style={[styles.amount, { color: palette.primary }]}>{formatCurrency(payment.amount)}</Text>
               </View>
-              <Text style={[styles.meta, { color: palette.muted }]}>{payment.groupName}</Text>
+              <Text style={[styles.meta, { color: palette.muted }]}>
+                {payment.groupName}{payment.round ? ` · Round ${payment.round}` : ''}{payment.type === 'admin-fee' ? ' · Admin fee' : ''}
+              </Text>
               <Text style={[styles.meta, { color: palette.muted }]}>{payment.date}</Text>
               <Text style={[styles.status, { color: payment.status === 'verified' ? palette.primary : palette.muted }]}>
                 {payment.status === 'verified' ? 'Verified' : 'Pending verification'}

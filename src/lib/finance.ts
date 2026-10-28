@@ -1,3 +1,5 @@
+import type { AdminFeeMode, AuctionRemainderMode, Group } from '../types';
+
 export function calculateGrossMonthlyChit(memberCount: number, monthlyContribution: number): number {
   return memberCount * monthlyContribution;
 }
@@ -5,6 +7,37 @@ export function calculateGrossMonthlyChit(memberCount: number, monthlyContributi
 export function calculateExpectedTotal(groupMembers: number, monthlyContribution: number, instalments: number): number {
   const grossMonthly = calculateGrossMonthlyChit(groupMembers, monthlyContribution);
   return grossMonthly * instalments;
+}
+
+export interface ChitPlan {
+  monthlyContribution: number;
+  grossMonthlyPot: number;
+  totalGroupContributions: number;
+}
+
+export function calculateChitPlan(
+  totalContributionPerMember: number,
+  memberCount: number,
+  instalments: number,
+): ChitPlan | null {
+  if (
+    !Number.isSafeInteger(totalContributionPerMember)
+    || totalContributionPerMember <= 0
+    || !Number.isSafeInteger(memberCount)
+    || memberCount < 2
+    || !Number.isSafeInteger(instalments)
+    || instalments < 1
+    || totalContributionPerMember % instalments !== 0
+  ) {
+    return null;
+  }
+
+  const monthlyContribution = totalContributionPerMember / instalments;
+  const grossMonthlyPot = calculateGrossMonthlyChit(memberCount, monthlyContribution);
+  const totalGroupContributions = grossMonthlyPot * instalments;
+  if (!Number.isSafeInteger(grossMonthlyPot) || !Number.isSafeInteger(totalGroupContributions)) return null;
+
+  return { monthlyContribution, grossMonthlyPot, totalGroupContributions };
 }
 
 export function calculateOutstandingBalance(amountDue: number, verifiedPayments: number): number {
@@ -24,6 +57,87 @@ export function calculateDividendAllocation(totalDividend: number, memberCount: 
   return memberCount > 0 ? totalDividend / memberCount : 0;
 }
 
+export interface ChitSettlement {
+  grossPot: number;
+  winningDiscount: number;
+  foremanCommission: number;
+  remainingAmount: number;
+  carryForwardAmount: number;
+  reserveAmount: number;
+  totalDividend: number;
+  dividendPerMember: number;
+  effectiveContribution: number;
+  winnerPayout: number;
+}
+
+export function calculateChitSettlement({
+  grossPot,
+  winningDiscount,
+  foremanCommission,
+  memberCount,
+  monthlyContribution,
+  remainderMode = 'dividend',
+}: {
+  grossPot: number;
+  winningDiscount: number;
+  foremanCommission: number;
+  memberCount: number;
+  monthlyContribution: number;
+  remainderMode?: AuctionRemainderMode;
+}): ChitSettlement {
+  const remainingAmount = Math.max(winningDiscount - foremanCommission, 0);
+  const totalDividend = remainderMode === 'dividend' ? remainingAmount : 0;
+  const dividendPerMember = remainderMode === 'dividend'
+    ? Math.floor(calculateDividendAllocation(totalDividend, memberCount))
+    : 0;
+  const distributedDividend = dividendPerMember * memberCount;
+  const unallocatedRemainder = Math.max(remainingAmount - distributedDividend, 0);
+  return {
+    grossPot,
+    winningDiscount,
+    foremanCommission,
+    remainingAmount,
+    carryForwardAmount: remainderMode === 'carry-forward' ? remainingAmount : 0,
+    reserveAmount: remainderMode === 'reserve'
+      ? remainingAmount
+      : remainderMode === 'dividend'
+        ? unallocatedRemainder
+        : 0,
+    totalDividend,
+    dividendPerMember,
+    effectiveContribution: Math.max(monthlyContribution - dividendPerMember, 0),
+    winnerPayout: Math.max(grossPot - winningDiscount, 0),
+  };
+}
+
+export function getAdminFeePerMemberForRound(
+  mode: AdminFeeMode,
+  amount: number,
+  round: number,
+): number {
+  if (!Number.isSafeInteger(amount) || amount <= 0 || !Number.isSafeInteger(round) || round < 1) return 0;
+  return mode === 'monthly-per-member' || (mode === 'one-time-per-member' && round === 1)
+    ? amount
+    : 0;
+}
+
+export function getExpectedGroupCollections(
+  group: Pick<Group, 'memberCount' | 'monthlyContribution' | 'instalmentCount' | 'adminFeeMode' | 'adminFeeAmount'>
+    & { auctions: Pick<Group['auctions'][number], 'round' | 'dividendPerMember'>[] },
+): number {
+  const auctionsByRound = new Map(group.auctions.map((auction) => [auction.round, auction]));
+  let expected = 0;
+  for (let round = 1; round <= group.instalmentCount; round += 1) {
+    const auction = auctionsByRound.get(round);
+    const basePerMember = auction
+      ? Math.max(group.monthlyContribution - auction.dividendPerMember, 0)
+      : group.monthlyContribution;
+    const feePerMember = getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, round);
+    expected += group.memberCount * (basePerMember + feePerMember);
+  }
+  return expected;
+}
+
 export function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
@@ -33,10 +147,25 @@ export function formatCurrency(value: number): string {
 }
 
 export function getCollectionSummary(
-  groups: Array<{ memberCount: number; monthlyContribution: number; instalmentCount: number; verifiedCollection: number; outstanding: number }>,
+  groups: {
+    memberCount: number;
+    monthlyContribution: number;
+    instalmentCount: number;
+    verifiedCollection: number;
+    outstanding: number;
+    adminFeeMode?: AdminFeeMode;
+    adminFeeAmount?: number;
+  }[],
 ) {
   const expected = groups.reduce(
-    (sum, group) => sum + calculateExpectedTotal(group.memberCount, group.monthlyContribution, group.instalmentCount),
+    (sum, group) => {
+      const totalAdminFee = group.adminFeeMode === 'monthly-per-member'
+        ? (group.adminFeeAmount ?? 0) * group.memberCount * group.instalmentCount
+        : group.adminFeeMode === 'one-time-per-member'
+          ? (group.adminFeeAmount ?? 0) * group.memberCount
+          : 0;
+      return sum + calculateExpectedTotal(group.memberCount, group.monthlyContribution, group.instalmentCount) + totalAdminFee;
+    },
     0,
   );
   const verified = groups.reduce((sum, group) => sum + group.verifiedCollection, 0);
