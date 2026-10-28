@@ -7,20 +7,28 @@
     "@react-navigation/bottom-tabs": "^7.21.0",
     "@react-navigation/native": "^7.5.1",
     "@react-navigation/native-stack": "^7.21.0",
+    "@supabase/supabase-js": "^2.118.0",
     "expo": "~58.0.21",
     "expo-constants": "~58.0.14",
     "expo-linking": "~58.0.15",
     "expo-router": "~58.0.28",
+    "expo-sharing": "~58.0.21",
     "expo-status-bar": "~58.0.4",
+    "expo-web-browser": "~58.0.7",
+    "html2canvas-pro": "^2.5.0",
     "react": "^19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.0",
     "react-native-safe-area-context": "~5.10.1",
     "react-native-screens": "~4.30.0",
+    "react-native-url-polyfill": "^4.0.0",
+    "react-native-view-shot": "6.1.1",
     "react-native-web": "^0.21.4"
   },
   "devDependencies": {
     "@types/react": "~19.3.0",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~58.0.4",
     "typescript": "~6.0.3",
     "vitest": "^5.0.5"
   },
@@ -34,7 +42,8 @@
     "build:android:apk": "npx eas-cli@latest build --platform android --profile production-apk",
     "build:android:play": "npx eas-cli@latest build --platform android --profile production",
     "build:ios": "npx eas-cli@latest build --platform ios --profile production",
-    "build:ios:simulator": "npx eas-cli@latest build --platform ios --profile ios-simulator"
+    "build:ios:simulator": "npx eas-cli@latest build --platform ios --profile ios-simulator",
+    "lint": "expo lint"
   },
   "private": true
 }

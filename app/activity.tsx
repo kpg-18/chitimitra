@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useColorScheme } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View, useColorScheme } from 'react-native';
 import { useAppContext } from '../src/context/AppContext';
+import { getMemberGroups } from '../src/lib/groupAccess';
 import { getText } from '../src/lib/i18n';
 
 export default function ActivityScreen() {
@@ -9,11 +9,9 @@ export default function ActivityScreen() {
   const scheme = useColorScheme();
   const isDark = state.theme === 'dark' || (state.theme === 'system' && scheme === 'dark');
   const palette = isDark ? darkColors : lightColors;
-  const visibleActivities = state.groups
-    .filter((group) => group.members.some(
-      (member) => member.userId === state.user.id || (!member.userId && member.name === state.user.name),
-    ))
-    .flatMap((group) => group.activities);
+  const visibleActivities = state.user
+    ? getMemberGroups(state.groups, state.user.id, state.user.name).flatMap((group) => group.activities)
+    : [];
 
   return (
     <View style={[styles.container, { backgroundColor: palette.bg }]}>
