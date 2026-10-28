@@ -2,7 +2,7 @@ name: Deploy Expo web app to GitHub Pages
 
 on:
   push:
-    branches: [main, feature/admin-fee-auction-remainder]
+    branches: [main, feature/admin-fee-auction-remainder, feature/chit-final-payout-ledger]
   workflow_dispatch:
 
 permissions:

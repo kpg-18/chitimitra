@@ -42,6 +42,8 @@ export interface PaymentRecord {
   round?: number;
   memberId: string;
   memberName: string;
+  paidByMemberId?: string;
+  paidByName?: string;
   amount: number;
   status: PaymentStatus;
   date: string;
@@ -52,6 +54,7 @@ export interface AuctionRecord {
   id: string;
   round: number;
   date: string;
+  outcomeType?: 'auction' | 'final-payout';
   winnerMemberId: string;
   winnerName: string;
   winningDiscount: number;
@@ -62,9 +65,11 @@ export interface AuctionRecord {
   remainingAmount: number;
   carryForwardAmount: number;
   reserveAmount: number;
+  reserveBalanceAfter?: number;
   payoutAmount: number;
   contributions: { memberId: string; amount: number }[];
   paidMemberIds: string[];
+  waivedContributionMemberIds?: string[];
 }
 
 export interface ActivityItem {
@@ -91,7 +96,7 @@ export interface Group {
   adminFeeMode: AdminFeeMode;
   adminFeeAmount: number;
   minimumBidDiscount: number;
-  bidIncrement: 100 | 200 | 500;
+  bidIncrement: number;
   fixedDiscountAmount: number;
   instalmentCount: number;
   memberCount: number;
