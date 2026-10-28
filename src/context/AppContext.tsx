@@ -5,7 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
 import { initialState } from '../data/seed';
 import { canManageGroup } from '../lib/groupAccess';
-import { calculateChitSettlement, getAdminFeePerMemberForRound, getExpectedGroupCollections } from '../lib/finance';
+import { calculateChitSettlement, getAdminFeePerMemberForRound, getExpectedGroupCollections, getFinalPayoutMember, hasOnePayoutPerMemberSchedule } from '../lib/finance';
 import { exchangeOAuthCode, isSupabaseConfigured, supabase } from '../lib/supabase';
 import type { AppState, AuctionRecord, AuctionRemainderMode, ChitType, Group, InviteMode, Locale, ManagementMode, ThemeMode, UserProfile, Visibility } from '../types';
 import type { User } from '@supabase/supabase-js';
@@ -60,6 +60,18 @@ function normalizeStoredGroups(groups: Group[] | undefined): Group[] {
     }));
 }
 
+function getPayerDetails(group: Group, memberId: string, rawName?: string) {
+  const member = group.members.find((item) => item.id === memberId);
+  const paidByName = rawName?.trim() || member?.name || 'Unknown payer';
+  const otherMember = group.members.find((item) =>
+    item.id !== memberId && item.name.trim().toLocaleLowerCase() === paidByName.toLocaleLowerCase(),
+  );
+  return {
+    paidByName,
+    ...(otherMember ? { paidByMemberId: otherMember.id } : {}),
+  };
+}
+
 interface CreateGroupInput {
   name: string;
   description: string;
@@ -71,7 +83,7 @@ interface CreateGroupInput {
   adminFeeMode: Group['adminFeeMode'];
   adminFeeAmount: number;
   minimumBidDiscount: number;
-  bidIncrement: 100 | 200 | 500;
+  bidIncrement: number;
   fixedDiscountAmount: number;
   monthlyContribution: number;
   memberCount: number;
@@ -86,7 +98,7 @@ interface RecordAuctionInput {
   winnerMemberId: string;
   winningDiscount: number;
   remainderMode: AuctionRemainderMode;
-  memberContributions: { memberId: string; amount: number; adminFeeAmount: number }[];
+  memberContributions: { memberId: string; amount: number; adminFeeAmount: number; paidByName?: string }[];
 }
 
 interface AppContextValue {
@@ -110,9 +122,10 @@ interface AppContextValue {
   setLocale: (locale: Locale) => void;
   addGroup: (group: Group) => void;
   createGroup: (draft: CreateGroupInput) => string;
-  recordRoundContributions: (groupId: string, round: number, contributions: { memberId: string; amount: number; adminFeeAmount: number }[]) => boolean;
+  recordRoundContributions: (groupId: string, round: number, contributions: { memberId: string; amount: number; adminFeeAmount: number; paidByName?: string }[]) => boolean;
   recordAuction: (groupId: string, draft: RecordAuctionInput) => AuctionRecord | null;
-  setAuctionMemberPaid: (groupId: string, auctionId: string, memberId: string, isPaid: boolean) => boolean;
+  recordFinalPayout: (groupId: string, date: string, adminFees: { memberId: string; amount: number; paidByName?: string }[]) => AuctionRecord | null;
+  setAuctionMemberPaid: (groupId: string, auctionId: string, memberId: string, isPaid: boolean, paidByName?: string) => boolean;
   deleteGroup: (groupId: string) => boolean;
   addMemberToGroup: (groupId: string, memberName: string, isGuest?: boolean) => void;
   verifyPayment: (groupId: string, paymentId: string) => void;
@@ -363,6 +376,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       createGroup: (draft) => {
         const user = state.user;
         if (!user) throw new Error('Sign in before creating a group.');
+        if (
+          !hasOnePayoutPerMemberSchedule(draft.memberCount, draft.instalmentCount)
+        ) throw new Error('The group must have the same number of members and monthly rounds.');
+        if (!Number.isSafeInteger(draft.bidIncrement) || draft.bidIncrement <= 0) {
+          throw new Error('The bid raise must be a positive whole-rupee amount.');
+        }
         const groupId = `group-${Date.now()}`;
         const invitees = draft.members.map((member) => ({
           name: member.name.trim(),
@@ -464,6 +483,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 round,
                 memberId,
                 memberName: member.name,
+                ...getPayerDetails(group, memberId, contributions.find((item) => item.memberId === memberId)?.paidByName),
                 amount,
                 status: 'verified' as const,
                 date,
@@ -474,6 +494,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 round,
                 memberId,
                 memberName: member.name,
+                ...getPayerDetails(group, memberId, contributions.find((item) => item.memberId === memberId)?.paidByName),
                 amount: adminFeeAmount,
                 status: 'verified' as const,
                 date,
@@ -503,6 +524,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               ],
               verifiedCollection,
               outstanding: Math.max(expectedCollected - verifiedCollection, 0),
+              activities: [
+                {
+                  id: `activity-round-payments-${Date.now()}`,
+                  title: `Round ${round} payment checklist updated`,
+                  time: 'just now',
+                  detail: `${roundPayments.filter((payment) => payment.type === 'collection').length} contribution and ${roundPayments.filter((payment) => payment.type === 'admin-fee').length} admin-fee payment records saved.`,
+                },
+                ...item.activities,
+              ],
             };
           }),
         }));
@@ -515,6 +545,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         const round = group.currentRound;
         const winningMember = group.members.find((member) => member.id === draft.winnerMemberId);
+        const previousWinners = new Set(group.auctions.map((auction) => auction.winnerMemberId));
         const grossPot = group.totalAmount + (group.carryForwardBalance ?? 0);
         const maximumDiscount = Math.floor(grossPot * 0.3);
         const winningDiscount = draft.winningDiscount;
@@ -530,7 +561,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           foremanCommission,
           memberCount: group.memberCount,
           monthlyContribution: group.monthlyContribution,
-          remainderMode: draft.remainderMode,
+          remainderMode: 'reserve',
         });
         const contributionByMember = new Map(
           group.payments
@@ -563,7 +594,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const adminFeeCollected = [...adminFeeByMember.values()].reduce((sum, amount) => sum + amount, 0);
         const parsedDate = new Date(`${draft.date}T00:00:00Z`);
         if (
-          !winningMember
+          !hasOnePayoutPerMemberSchedule(group.memberCount, group.instalmentCount)
+          || !winningMember
+          || previousWinners.has(winningMember.id)
           || round < 1
           || round > group.instalmentCount
           || !Number.isSafeInteger(winningDiscount)
@@ -584,16 +617,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           id: `auction-${Date.now()}`,
           round,
           date: draft.date,
+          outcomeType: 'auction',
           winnerMemberId: winningMember.id,
           winnerName: winningMember.name,
           winningDiscount,
           foremanCommission,
           adminFeeCollected,
           dividendPerMember: settlement.dividendPerMember,
-          remainderMode: draft.remainderMode,
+          remainderMode: 'reserve',
           remainingAmount: settlement.remainingAmount,
           carryForwardAmount: settlement.carryForwardAmount,
           reserveAmount: settlement.reserveAmount,
+          reserveBalanceAfter: (group.reserveBalance ?? 0) + settlement.reserveAmount,
           payoutAmount: settlement.winnerPayout,
           contributions,
           paidMemberIds: group.members
@@ -613,6 +648,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               round,
               memberId: member.id,
               memberName: member.name,
+              ...getPayerDetails(group, member.id, draft.memberContributions.find((item) => item.memberId === member.id)?.paidByName),
               amount,
               status: 'verified' as const,
               date: draft.date,
@@ -623,6 +659,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               round,
               memberId: member.id,
               memberName: member.name,
+              ...getPayerDetails(group, member.id, draft.memberContributions.find((item) => item.memberId === member.id)?.paidByName),
               amount: adminFeeAmount,
               status: 'verified' as const,
               date: draft.date,
@@ -670,7 +707,127 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }));
         return auction;
       },
-      setAuctionMemberPaid: (groupId, auctionId, memberId, isPaid) => {
+      recordFinalPayout: (groupId, date, adminFees) => {
+        const user = state.user;
+        const group = state.groups.find((item) => item.id === groupId);
+        const finalMember = group ? getFinalPayoutMember(group) : null;
+        const round = group?.currentRound ?? 0;
+        const expectedFee = group
+          ? getAdminFeePerMemberForRound(group.adminFeeMode ?? 'none', group.adminFeeAmount ?? 0, round)
+          : 0;
+        const feeMemberIds = adminFees.map(({ memberId }) => memberId);
+        const parsedDate = new Date(`${date}T00:00:00Z`);
+        if (
+          !user
+          || !group
+          || !canManageGroup(group, user.id, user.name)
+          || !finalMember
+          || !Number.isSafeInteger(group.totalAmount)
+          || adminFees.length !== group.members.length
+          || new Set(feeMemberIds).size !== group.members.length
+          || adminFees.some(({ memberId, amount }) =>
+            !group.members.some((member) => member.id === memberId)
+            || !Number.isSafeInteger(amount)
+            || amount < 0
+            || amount > expectedFee,
+          )
+          || !/^\d{4}-\d{2}-\d{2}$/.test(date)
+          || Number.isNaN(parsedDate.getTime())
+          || parsedDate.toISOString().slice(0, 10) !== date
+          || group.auctions.some((auction) => auction.round === round)
+        ) return null;
+
+        const id = `final-payout-${Date.now()}`;
+        const waivedContributionMemberIds = group.members.map((member) => member.id);
+        const adminFeeCollected = adminFees.reduce((sum, item) => sum + item.amount, 0);
+        const auction: AuctionRecord = {
+          id,
+          round,
+          date,
+          outcomeType: 'final-payout',
+          winnerMemberId: finalMember.id,
+          winnerName: finalMember.name,
+          winningDiscount: 0,
+          foremanCommission: 0,
+          adminFeeCollected,
+          dividendPerMember: 0,
+          remainderMode: 'reserve',
+          remainingAmount: 0,
+          carryForwardAmount: 0,
+          reserveAmount: 0,
+          reserveBalanceAfter: group.reserveBalance - group.totalAmount,
+          payoutAmount: group.totalAmount,
+          contributions: [],
+          paidMemberIds: waivedContributionMemberIds,
+          waivedContributionMemberIds,
+        };
+        const feePayments = adminFees.flatMap(({ memberId, amount, paidByName }) => {
+          if (amount <= 0) return [];
+          const member = group.members.find((item) => item.id === memberId);
+          if (!member) return [];
+          return [{
+            id: `payment-admin-fee-${id}-${memberId}`,
+            round,
+            memberId,
+            memberName: member.name,
+            ...getPayerDetails(group, memberId, paidByName),
+            amount,
+            status: 'verified' as const,
+            date,
+            type: 'admin-fee' as const,
+          }];
+        });
+        const payoutPayment: Group['payments'][number] = {
+          id: `payment-${id}`,
+          round,
+          memberId: finalMember.id,
+          memberName: finalMember.name,
+          amount: group.totalAmount,
+          status: 'verified',
+          date,
+          type: 'payout',
+        };
+        const newPayments = [...feePayments, payoutPayment];
+        const collectedAmount = feePayments.reduce((sum, payment) => sum + payment.amount, 0);
+
+        setState((current) => ({
+          ...current,
+          groups: current.groups.map((item) => {
+            if (item.id !== groupId) return item;
+            const previousRoundTotal = item.payments
+              .filter((payment) => payment.round === round && (payment.type === 'collection' || payment.type === 'admin-fee'))
+              .reduce((sum, payment) => sum + payment.amount, 0);
+            const updatedGroup = { ...item, auctions: [...item.auctions, auction] };
+            const expectedCollected = getExpectedGroupCollections(updatedGroup);
+            const verifiedCollection = Math.max(item.verifiedCollection + collectedAmount - previousRoundTotal, 0);
+            return {
+              ...item,
+              currentRound: round + 1,
+              auctions: updatedGroup.auctions,
+              payments: [
+                ...item.payments.filter((payment) =>
+                  payment.round !== round || (payment.type !== 'collection' && payment.type !== 'admin-fee'),
+                ),
+                ...newPayments,
+              ],
+              reserveBalance: group.reserveBalance - group.totalAmount,
+              verifiedCollection,
+              outstanding: Math.max(expectedCollected - verifiedCollection, 0),
+              activities: [
+                {
+                  id: `activity-${Date.now()}`,
+                  title: `Final chit payout · Round ${round}`,
+                  time: 'just now',
+                  detail: `${finalMember.name} received ${group.totalAmount.toLocaleString('en-IN')} from the accumulated chit balance. Contributions were waived for all members this round.`,
+                },
+                ...item.activities,
+              ],
+            };
+          }),
+        }));
+        return auction;
+      },
+      setAuctionMemberPaid: (groupId, auctionId, memberId, isPaid, paidByName) => {
         const user = state.user;
         const group = state.groups.find((item) => item.id === groupId);
         if (
@@ -678,7 +835,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           || !group
           || !canManageGroup(group, user.id, user.name)
           || !group.members.some((member) => member.id === memberId)
-          || !group.auctions.some((auction) => auction.id === auctionId)
+          || !group.auctions.some((auction) => auction.id === auctionId && auction.outcomeType !== 'final-payout')
         ) return false;
 
         setState((current) => ({
@@ -698,6 +855,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             const delta = nextContribution + nextAdminFee - oldContribution - oldAdminFee;
             const member = item.members.find((currentMember) => currentMember.id === memberId);
             const paymentId = `payment-${auctionId}-${memberId}`;
+            if (!member) return item;
+            const existingCollectionPayment = item.payments.find((payment) => payment.id === paymentId);
+            const nextPaidByName = paidByName?.trim() || existingCollectionPayment?.paidByName || member.name;
             const contributions = (targetAuction.contributions ?? [])
               .filter((payment) => payment.memberId !== memberId);
             if (nextContribution > 0) contributions.push({ memberId, amount: nextContribution });
@@ -712,6 +872,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 round: targetAuction.round,
                 memberId,
                 memberName: member.name,
+                ...getPayerDetails(item, memberId, nextPaidByName),
                 amount: nextContribution,
                 status: 'verified',
                 date: targetAuction.date,
@@ -724,6 +885,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 round: targetAuction.round,
                 memberId,
                 memberName: member.name,
+                ...getPayerDetails(item, memberId, nextPaidByName),
                 amount: nextAdminFee,
                 status: 'verified',
                 date: targetAuction.date,
@@ -746,6 +908,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               payments,
               verifiedCollection,
               outstanding: Math.max(expectedCollected - verifiedCollection, 0),
+              activities: [
+                {
+                  id: `activity-payment-${Date.now()}`,
+                  title: isPaid ? 'Payment recorded or corrected' : 'Payment marked unpaid',
+                  time: 'just now',
+                  detail: isPaid
+                    ? `${nextPaidByName} paid ${member.name}'s round ${targetAuction.round} contribution of ₹${nextContribution.toLocaleString('en-IN')}${nextPaidByName === member.name ? '' : ` on ${member.name}'s behalf`}.`
+                    : `${member.name}'s round ${targetAuction.round} contribution was marked unpaid.`,
+                },
+                ...item.activities,
+              ],
             };
           }),
         }));

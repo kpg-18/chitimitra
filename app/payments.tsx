@@ -26,6 +26,49 @@ export default function PaymentsScreen() {
     <View style={[styles.container, { backgroundColor: palette.bg }]}>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={[styles.header, { color: palette.text }]}>{getText(state.locale, 'payments')}</Text>
+        {visibleGroups.map((group) => (
+          <View key={`ledger-${group.id}`} style={[styles.ledgerCard, { backgroundColor: palette.card, borderColor: palette.border }]}>
+            <Text style={[styles.ledgerTitle, { color: palette.text }]}>{group.name} · Member ledger</Text>
+            <Text style={[styles.meta, { color: palette.muted }]}>
+              Accumulated chit balance {formatCurrency(group.reserveBalance)} · Outstanding {formatCurrency(group.outstanding)}
+            </Text>
+            {group.members.map((member) => {
+              const memberPayments = group.payments.filter((payment) => payment.memberId === member.id && payment.status === 'verified');
+              const contributions = memberPayments
+                .filter((payment) => payment.type === 'collection')
+                .reduce((sum, payment) => sum + payment.amount, 0);
+              const fees = memberPayments
+                .filter((payment) => payment.type === 'admin-fee')
+                .reduce((sum, payment) => sum + payment.amount, 0);
+              const payouts = memberPayments
+                .filter((payment) => payment.type === 'payout')
+                .reduce((sum, payment) => sum + payment.amount, 0);
+              const paidOnBehalf = memberPayments
+                .filter((payment) => payment.type === 'collection' && payment.paidByName && payment.paidByName !== member.name);
+              const paidForOthers = group.payments.filter((payment) =>
+                payment.type === 'collection' && payment.status === 'verified' && payment.paidByMemberId === member.id,
+              );
+              return (
+                <View key={member.id} style={[styles.ledgerMember, { borderTopColor: palette.border }]}>
+                  <Text style={[styles.memberName, { color: palette.text }]}>{member.name}</Text>
+                  <Text style={[styles.meta, { color: palette.muted }]}>
+                    Contributions {formatCurrency(contributions)} · Fees {formatCurrency(fees)} · Payouts received {formatCurrency(payouts)}
+                  </Text>
+                  {paidOnBehalf.map((payment) => (
+                    <Text key={payment.id} style={[styles.meta, { color: palette.primary }]}>
+                      {payment.paidByName} paid {formatCurrency(payment.amount)} for {member.name} · Round {payment.round}
+                    </Text>
+                  ))}
+                  {paidForOthers.map((payment) => (
+                    <Text key={payment.id} style={[styles.meta, { color: palette.muted }]}>
+                      Paid {formatCurrency(payment.amount)} for {payment.memberName} · Round {payment.round}
+                    </Text>
+                  ))}
+                </View>
+              );
+            })}
+          </View>
+        ))}
         {payments.length === 0 ? (
           <Text style={[styles.empty, { color: palette.muted }]}>No payment updates yet.</Text>
         ) : (
@@ -36,8 +79,16 @@ export default function PaymentsScreen() {
                 <Text style={[styles.amount, { color: palette.primary }]}>{formatCurrency(payment.amount)}</Text>
               </View>
               <Text style={[styles.meta, { color: palette.muted }]}>
-                {payment.groupName}{payment.round ? ` · Round ${payment.round}` : ''}{payment.type === 'admin-fee' ? ' · Admin fee' : ''}
+                {payment.groupName}{payment.round ? ` · Round ${payment.round}` : ''}
+                {payment.type === 'admin-fee' ? ' · Admin fee' : payment.type === 'payout' ? ' · Payout' : ' · Contribution'}
               </Text>
+              {payment.type !== 'payout' && (
+                <Text style={[styles.meta, { color: palette.muted }]}>
+                  {payment.paidByName && payment.paidByName !== payment.memberName
+                    ? `Paid by ${payment.paidByName} for ${payment.memberName}`
+                    : `Paid by ${payment.memberName}`}
+                </Text>
+              )}
               <Text style={[styles.meta, { color: palette.muted }]}>{payment.date}</Text>
               <Text style={[styles.status, { color: payment.status === 'verified' ? palette.primary : palette.muted }]}>
                 {payment.status === 'verified' ? 'Verified' : 'Pending verification'}
@@ -98,6 +149,9 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { padding: 18, paddingBottom: 100 },
   header: { fontSize: 28, fontWeight: '700', marginBottom: 14 },
+  ledgerCard: { borderRadius: 18, borderWidth: 1, padding: 16, marginBottom: 14 },
+  ledgerTitle: { fontSize: 17, fontWeight: '700' },
+  ledgerMember: { borderTopWidth: 1, marginTop: 10, paddingTop: 10 },
   paymentCard: { borderRadius: 18, borderWidth: 1, padding: 16, marginBottom: 14 },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   memberName: { fontSize: 18, fontWeight: '700' },
