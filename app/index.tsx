@@ -18,7 +18,6 @@ export default function HomeScreen() {
   const [pulse] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
-    if (visibleGroups.length > 0) return;
     const animation = Animated.loop(
       Animated.sequence([
         Animated.timing(pulse, {
@@ -37,20 +36,30 @@ export default function HomeScreen() {
     );
     animation.start();
     return () => animation.stop();
-  }, [pulse, visibleGroups.length]);
+  }, [pulse]);
 
   const pulseScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1.08] });
   const pulseOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.18, 0.48] });
+  const logoScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
+  const logoOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] });
 
   return (
     <View style={[styles.container, { backgroundColor: palette.bg }]}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <View style={styles.topBar}>
-          <View>
-            <Text style={[styles.eyebrow, { color: palette.primary }]}>CHITI MITRA · ಚಿಟಿ ಮಿತ್ರ</Text>
-            <Text style={[styles.welcome, { color: palette.text }]}>
-              {user ? `Namaskara, ${user.name.split(' ')[0]}` : 'Welcome to Chiti Mitra'}
-            </Text>
+          <View style={styles.brandBlock}>
+            <Animated.Image
+              source={require('../assets/chiti-mitra-logo.png')}
+              resizeMode="contain"
+              accessibilityLabel="Chiti Mitra logo"
+              style={[styles.brandMark, { opacity: logoOpacity, transform: [{ scale: logoScale }] }]}
+            />
+            <View style={styles.brandCopy}>
+              <Text style={[styles.eyebrow, { color: palette.primary }]}>CHITI MITRA · ಚಿಟಿ ಮಿತ್ರ</Text>
+              <Text numberOfLines={1} style={[styles.welcome, { color: palette.text }]}>
+                {user ? `Namaskara, ${user.name.split(' ')[0]}` : 'Welcome to Chiti Mitra'}
+              </Text>
+            </View>
           </View>
           {authInitializationError ? (
             <Text accessibilityRole="alert" style={styles.startupError}>{authInitializationError}</Text>
@@ -233,8 +242,11 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   scrollContent: { padding: 18, paddingBottom: 100 },
   topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 },
+  brandBlock: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  brandMark: { width: 44, height: 44, borderRadius: 12 },
+  brandCopy: { flex: 1, minWidth: 0 },
   startupError: { color: '#b42318', fontSize: 13, lineHeight: 18, marginBottom: 12 },
-  welcome: { fontSize: 21, fontWeight: '700', marginTop: 6 },
+  welcome: { fontSize: 21, fontWeight: '700', marginTop: 6, flexShrink: 1 },
   avatar: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   avatarText: { fontSize: 13, fontWeight: '700' },
   emptyHero: { borderRadius: 26, borderWidth: 1, padding: 20, alignItems: 'center', overflow: 'hidden' },
